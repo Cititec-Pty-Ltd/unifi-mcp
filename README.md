@@ -1,17 +1,15 @@
 # UniFi MCP Server
 
-MCP server for [Ubiquiti UniFi](https://www.ui.com/)'s **Cloud Site Manager API** - sites, hosts, devices, WAN/ISP health metrics, and SD-WAN configuration/status, for AI assistants and the WYRE Conduit gateway.
+MCP server for [Ubiquiti UniFi](https://www.ui.com/)'s **Cloud Site Manager API** - sites, hosts, devices, WAN/ISP health metrics, SD-WAN configuration/status, and read-only per-console Network detail (devices, clients, networks, firewall) through the cloud connector - for AI assistants and the WYRE Conduit gateway.
 
-## Scope: Cloud Site Manager API only (deliberate)
+## Scope: Cloud Site Manager API, plus read-only Network API through the cloud connector
 
 UniFi exposes two distinct API surfaces:
 
-- **Local per-controller API** (Network Application API, `developer.ui.com/network/...`) - lives on each customer's own console/controller, requires a separate API key per site with no central integration point, and covers per-site configuration in depth: clients, networks/VLANs/DHCP, WLANs/SSIDs, firewall rules, port forwarding, etc.
-- **Cloud Site Manager API** (`developer.ui.com/site-manager/...`, base URL `https://api.ui.com`) - a single UI.com account key that aggregates data across every site adopted to that account, but exposes a **much narrower** read surface: sites, hosts, device inventory, WAN/ISP metrics, and SD-WAN config/status only.
+- **Cloud Site Manager API** (`developer.ui.com/site-manager/...`, base URL `https://api.ui.com`) - a single UI.com account key that aggregates data across every site adopted to that account, with a narrow read surface: sites, hosts, device inventory, WAN/ISP metrics, and SD-WAN config/status.
+- **Local Network application API** (`developer.ui.com/network/...`) - lives on each console and covers per-site detail: individual devices and their statistics, connected clients, networks/VLANs, WiFi broadcasts, firewall policies and zones, ACL rules, VPN, and more.
 
-**This connector targets the Cloud Site Manager API only**, per an explicit upstream scope decision - the local per-controller API is deferred, not implemented as a fallback.
-
-**Consequence for tool coverage:** the Cloud Site Manager API does **not** expose several things a "typical" network-management connector would have - there is no client-listing/client-detail endpoint (only aggregate client *counts* inside a site's `statistics`), no VLAN/network/DHCP-config endpoint, no WLAN/SSID endpoint, and no firewall-rule endpoint as first-class operations. Those all live on the local per-controller API. This connector implements 9 of the 10 paths the Cloud Site Manager API's own published OpenAPI spec defines as dedicated, purpose-built read operations - see Tools below. The 10th path is the connector-proxy endpoint, covered in its own subsection below - it is excluded by design, not missed.
+This connector implements all 9 dedicated read operations of the Cloud Site Manager API. It also reaches a **fixed, read-only subset** of each console's Network API through the Site Manager's connector-proxy endpoint, using the same UI.com API key - see [The connector-proxy endpoint](#the-connector-proxy-endpoint-read-only-fixed-paths) below.
 
 ## Authentication
 
@@ -19,16 +17,22 @@ UniFi Site Manager authenticates with a single **static `X-API-Key` header** tie
 
 Two separate claims here, at deliberately different confidence levels - don't collapse them into one "read-only" statement:
 
-- **Structurally verified (checked directly, stated with full confidence):** this connector's own code makes zero mutating calls. Every function in `client.ts` calls one of the 9 dedicated read operations below; no `POST`/`PUT`/`PATCH`/`DELETE` call exists anywhere in `src/`, and the connector-proxy path (below) is never referenced under any name.
-- **Vendor-documented, not independently verified (hedged deliberately):** Ubiquiti's own Getting Started documentation describes Site Manager API keys generally as read-only ("currently read-only... cannot be used to make modifications to your UniFi infrastructure"). Whether that's actually enforced *server-side* against the connector-proxy path specifically - i.e. whether UI.com's backend rejects a write verb sent through `/v1/connector/consoles/{id}/*path`, versus the restriction being a documented policy rather than a hard technical block - has not been tested by WYRE. Nobody on this review sent a write verb against a live key to find out, correctly: that would be a destructive test against real customer infrastructure, not something to run without consent. **Do not read this connector, or this README, as having established that the underlying API key cannot perform writes** - only that this connector's own code never attempts one.
+- **Structurally verified (checked directly, stated with full confidence):** this connector's own code makes zero mutating calls. The only non-`GET` request is `unifi_query_isp_metrics`, a `POST` that is a filtered read. Every connector-proxy request is a `GET` to a fixed path built in `src/tools/network.ts`; `networkGet` in `client.ts` only sends `GET`, and no tool accepts a free-form path. A unit test asserts every `unifi_network_*` tool sends `GET`.
+- **Vendor-documented, not independently verified (hedged deliberately):** Ubiquiti's own Getting Started documentation describes Site Manager API keys generally as read-only ("currently read-only... cannot be used to make modifications to your UniFi infrastructure"). The connector-proxy endpoint is nevertheless documented as accepting `POST`/`PUT`/`PATCH`/`DELETE`, and whether UI.com's backend rejects those has not been tested. **Do not read this connector, or this README, as having established that the underlying API key cannot perform writes** - only that this connector's own code never attempts one.
 
 In gateway mode the key arrives per-request via the `X-UniFi-Api-Key` header; in local/stdio mode it's read once from `UNIFI_API_KEY`. HTTP mode also requires a signed `X-Gateway-S2S` header — see Configuration.
 
-### The connector-proxy endpoint (excluded by design)
+### The connector-proxy endpoint (read-only, fixed paths)
 
-The live spec (`https://developer.ui.com/site-manager/v1.0.0/openapi.json` - fetched directly with a plain `curl`/HTTP GET; this specific raw-JSON endpoint returns cleanly even though the *interactive docs pages* at `developer.ui.com` are a JS SPA that doesn't render via plain fetch) defines a 10th path beyond the 9 this connector implements: `/v1/connector/consoles/{id}/*path`, with all five HTTP methods - `GET`/`POST`/`PUT`/`PATCH`/`DELETE` (operationIds `ConnectorGet`/`ConnectorPost`/`ConnectorPut`/`ConnectorPatch`/`ConnectorDelete`). It is a generic reverse-proxy: `api.ui.com` forwards the request verbatim to the target console's local API at `http://127.0.0.1/proxy/[path]`, reaching the console's full local Network/Protect/InnerSpace surface - the same local per-controller API this connector's Scope section defers, just reached through the cloud endpoint instead of the console directly. The spec documents it as genuinely mutating - its own example for `DELETE` removes hotspot vouchers - and available to a **standard (non-organization) API key**, scoped to consoles that key's owner controls; it is not gated behind an org-tier key. (WYRE has not sent a live write call against this path - see the hedge in Authentication above.)
+The Site Manager spec (`https://developer.ui.com/site-manager/v1.0.0/openapi.json`) defines `/v1/connector/consoles/{id}/*path`, a reverse-proxy that forwards a request to the console's local API at `http://127.0.0.1/proxy/[path]`. It reaches the console's whole local Network/Protect/InnerSpace surface and accepts all five HTTP methods.
 
-This connector deliberately excludes the connector-proxy endpoint entirely, for the same reason the local per-controller API is out of scope: implementing it would mean re-exposing the whole local surface (clients, VLANs, WLANs, firewall rules, and genuine mutations) through one wildcard passthrough tool, defeating the purpose of scoping this connector to purpose-built cloud reads. No tool in this connector calls it, under any name.
+This connector does **not** expose it as a wildcard passthrough. The `unifi_network_*` tools each call one fixed `GET` path on the Network API (`/network/integration/v1/...`), with IDs URL-encoded so they cannot change the path. Limits from the spec:
+
+- The console must be online and on firmware 5.0.3 or later.
+- A standard API key reaches only consoles the key's owner controls; an organization key reaches any console in the organization.
+- 100 requests per minute per console, a 25-second upstream timeout, and a 10 MB response cap.
+
+The Network spec's server URL is `/v1/connector/consoles/{id}/proxy/network/integration`, while the connector's own example omits `/proxy/`. `networkGet` tries the spec's form first and retries once without `/proxy/` only on HTTP 404.
 
 ## Configuration
 
@@ -66,7 +70,7 @@ In `AUTH_MODE=gateway`, `/mcp` also requires `X-UniFi-Api-Key`. That header is t
 
 ## Tools
 
-9 read-only tools, one per dedicated read operation in the Cloud Site Manager API's published spec (10 paths total on the live spec; the 10th, a generic mutating connector-proxy endpoint, is excluded by design - see Authentication above).
+9 read-only tools for the Cloud Site Manager API, plus 16 read-only `unifi_network_*` tools for a console's local Network API through the connector proxy (see Authentication above).
 
 ### Sites
 - `unifi_list_sites` - list every site visible to this API key's account, with metadata (name, timezone, gateway MAC) and aggregate statistics (device/client counts, network performance).
@@ -87,11 +91,28 @@ In `AUTH_MODE=gateway`, `/mcp` also requires `X-UniFi-Api-Key`. That header is t
 - `unifi_get_sdwan_config` - full topology for one SD-WAN configuration: hub/spoke sites, attached networks, and routed subnets (CIDR). **Network-topology data - admin-gated by default**.
 - `unifi_get_sdwan_config_status` - deployment status for one SD-WAN configuration, including per-hub/spoke WAN IPs and latency. **Network-topology data - admin-gated by default**.
 
-`unifi_list_sites`, `unifi_list_hosts`, `unifi_get_host`, `unifi_get_isp_metrics`, `unifi_query_isp_metrics`, and `unifi_list_sdwan_configs` are plain-read tier: sites/hosts are the navigational directory most other tools need site/host IDs from, and WAN metrics are aggregate performance data, not PII or topology.
+### Network application (per console, via the connector proxy)
+
+Every tool takes `consoleId` (the host ID from `unifi_list_sites` or `unifi_list_hosts`). Site-level tools also take `siteId`, the console's **local** site UUID from `unifi_network_list_sites` - not the cloud site ID. List tools accept `offset` and `limit` (max 200), and most accept a UniFi `filter` expression such as `state.eq('OFFLINE')`.
+
+- `unifi_network_get_info` - Network application version and info.
+- `unifi_network_list_sites` - local sites on the console.
+- `unifi_network_list_pending_devices` - devices waiting for adoption. **Admin-gated.**
+- `unifi_network_list_devices` / `unifi_network_get_device` - adopted devices with name, model, MAC, IP, state, firmware, uplink and ports. **PII-bearing - admin-gated.**
+- `unifi_network_get_device_statistics` - latest uptime, CPU, memory and data rates for one device.
+- `unifi_network_list_clients` / `unifi_network_get_client` - connected clients (wired, wireless, VPN). **PII-bearing - admin-gated.**
+- `unifi_network_list_wans` - WAN interfaces on a site.
+- `unifi_network_list_vpn_tunnels` / `unifi_network_list_vpn_servers` - site-to-site tunnels and VPN servers. **Topology - admin-gated.**
+- `unifi_network_list_networks` / `unifi_network_list_wifi_broadcasts` - networks/VLANs and SSIDs. **Configuration - admin-gated.**
+- `unifi_network_list_firewall_policies` / `unifi_network_list_firewall_zones` / `unifi_network_list_acl_rules` - security configuration. **Admin-gated.**
+
+`SENSITIVE_NETWORK_TOOLS` in `src/tools/network.ts` lists the admin-gated `unifi_network_*` tools for gateway wiring.
+
+Among the cloud tools, `unifi_list_sites`, `unifi_list_hosts`, `unifi_get_host`, `unifi_get_isp_metrics`, `unifi_query_isp_metrics`, and `unifi_list_sdwan_configs` are plain-read tier: sites/hosts are the navigational directory most other tools need site/host IDs from, and WAN metrics are aggregate performance data, not PII or topology.
 
 ## Sensitivity
 
-This connector's own 9 tools surface two categories of sensitive data even though every one of them is read-only: **PII** (device MAC addresses, IP addresses, user-defined hostnames on every device returned by `unifi_list_devices`) and **network topology** (SD-WAN hub/spoke routes and subnets in `unifi_get_sdwan_config`/`unifi_get_sdwan_config_status`). Those three tools default to `isAdmin: true` in the Conduit wiring; everything else is plain read. This is separate from, and does not account for, the connector-proxy endpoint described under Authentication - that endpoint isn't implemented here at all, so it isn't part of this connector's tier model.
+This connector's tools surface two categories of sensitive data even though every one of them is read-only: **PII** (MAC addresses, IP addresses and hostnames of devices and clients) and **network topology and security configuration** (SD-WAN routes and subnets, networks, SSIDs, VPN, firewall and ACL rules). `unifi_list_devices`, `unifi_get_sdwan_config`, `unifi_get_sdwan_config_status` and the `unifi_network_*` tools in `SENSITIVE_NETWORK_TOOLS` should default to `isAdmin: true` in the gateway wiring; everything else is plain read.
 
 ## Development
 

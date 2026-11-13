@@ -59,7 +59,7 @@ async function request<T>(
   creds: UniFiCredentials,
   method: 'GET' | 'POST',
   path: string,
-  options: { query?: Record<string, unknown>; body?: unknown } = {}
+  options: { query?: Record<string, unknown>; body?: unknown; timeoutMs?: number } = {}
 ): Promise<T> {
   const qs = options.query ? buildQuery(options.query).toString() : '';
   const url = `${BASE_URL}${path}${qs ? `?${qs}` : ''}`;
@@ -71,7 +71,7 @@ async function request<T>(
       ...(options.body !== undefined ? { 'Content-Type': 'application/json' } : {}),
     },
     body: options.body !== undefined ? JSON.stringify(options.body) : undefined,
-    signal: AbortSignal.timeout(15_000),
+    signal: AbortSignal.timeout(options.timeoutMs ?? 15_000),
   });
 
   // 401 (invalid/revoked API key) and 429 (rate-limited) are distinct
@@ -192,4 +192,44 @@ export async function getSdWanConfigStatus(
   id: string
 ): Promise<SingleResponse<UniFiSdWanConfigStatus>> {
   return doGet(creds, `/v1/sd-wan-configs/${encodeURIComponent(id)}/status`);
+}
+
+// ---------------------------------------------------------------------
+// Network application (local per-console API), read-only, via the
+// Site Manager connector proxy: /v1/connector/consoles/{id}/...
+//
+// Only GET is ever sent, and only to the fixed paths the tools in
+// tools/network.ts build - there is no caller-supplied wildcard path.
+// The connector allows 100 requests/minute per console, a 25 s upstream
+// timeout and a 10 MB response cap; consoles need firmware >= 5.0.3.
+// ---------------------------------------------------------------------
+
+/**
+ * The Network OpenAPI spec's server URL includes `/proxy/`, while the
+ * connector's own example omits it. Try the spec's form first and fall
+ * back to the other only when the first returns 404.
+ */
+export const NETWORK_CONNECTOR_PREFIXES = ['proxy/network/integration', 'network/integration'] as const;
+
+/** GET a path on a console's local Network API (e.g. `/v1/sites`) through the cloud connector. */
+export async function networkGet<T>(
+  creds: UniFiCredentials,
+  consoleId: string,
+  path: string,
+  query?: Record<string, unknown>
+): Promise<T> {
+  if (!path.startsWith('/v1/')) {
+    throw new Error(`Network API path must start with /v1/: ${path}`);
+  }
+  const base = `/v1/connector/consoles/${encodeURIComponent(consoleId)}`;
+  let lastError: unknown;
+  for (const prefix of NETWORK_CONNECTOR_PREFIXES) {
+    try {
+      return await request<T>(creds, 'GET', `${base}/${prefix}${path}`, { query, timeoutMs: 30_000 });
+    } catch (err) {
+      lastError = err;
+      if (!(err instanceof UniFiApiError && err.status === 404)) throw err;
+    }
+  }
+  throw lastError;
 }
