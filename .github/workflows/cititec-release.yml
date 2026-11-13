@@ -68,7 +68,8 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: npx semantic-release
+        # package.json "repository" points at Wyre; release against this fork instead.
+        run: npx semantic-release --repository-url "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY"
 
       - name: Find the release tag on this commit
         id: tag
