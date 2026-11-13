@@ -1,0 +1,122 @@
+# Cititec release: build, test, tag a release with semantic-release, and push the Docker
+# image to ghcr.io/cititec-pty-ltd/unifi-mcp. Cititec-only - never send this file to Wyre
+# (see CITITEC-FORK.md). Wyre's own release.yml is disabled in this fork's Actions settings.
+#
+# Secrets:
+#   PACKAGES_READ_TOKEN  (optional, org or repo secret) classic token with read:packages,
+#                        needed when dependencies come from another organization's GitHub
+#                        Packages (example: @wyre-ai/*). Falls back to GITHUB_TOKEN.
+name: Cititec release
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write       # semantic-release tags and GitHub releases
+  issues: write         # @semantic-release/github comments
+  pull-requests: write  # @semantic-release/github comments
+  packages: write       # push the image to ghcr.io/cititec-pty-ltd
+
+concurrency:
+  group: cititec-release
+  cancel-in-progress: false
+
+env:
+  IMAGE: ghcr.io/cititec-pty-ltd/unifi-mcp
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10  # v6.0.3
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Setup Node.js
+        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e  # v6.4.0
+        with:
+          node-version: '22'
+          registry-url: 'https://npm.pkg.github.com'
+
+      - name: Map npm scopes to GitHub Packages
+        run: |
+          echo "@cititec-pty-ltd:registry=https://npm.pkg.github.com" >> "$NPM_CONFIG_USERCONFIG"
+          echo "@wyre-ai:registry=https://npm.pkg.github.com" >> "$NPM_CONFIG_USERCONFIG"
+          echo "@wyre-technology:registry=https://npm.pkg.github.com" >> "$NPM_CONFIG_USERCONFIG"
+
+      - name: Install dependencies
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.PACKAGES_READ_TOKEN || secrets.GITHUB_TOKEN }}
+        run: npm ci
+
+      - name: Build
+        run: npm run build
+
+      - name: Test
+        run: npm test
+
+      - name: semantic-release (tag and GitHub release)
+        id: sr
+        # The release is the tag; a later failure (often @semantic-release/github commenting
+        # on an upstream PR number that does not exist here) must not stop the image build.
+        # The last step fails the run if nothing was released.
+        continue-on-error: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: npx semantic-release
+
+      - name: Find the release tag on this commit
+        id: tag
+        run: |
+          git fetch --tags --force
+          tag="$(git tag --points-at HEAD | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | head -n 1 || true)"
+          echo "version=${tag#v}" >> "$GITHUB_OUTPUT"
+          if [ -n "$tag" ]; then echo "Released $tag"; else echo "No release on this commit - no image built"; fi
+
+      - name: Log in to ghcr.io
+        if: steps.tag.outputs.version != ''
+        uses: docker/login-action@650006c6eb7dba73a995cc03b0b2d7f5ca915bee  # v4.2.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up Docker Buildx
+        if: steps.tag.outputs.version != ''
+        uses: docker/setup-buildx-action@d7f5e7f509e45cec5c76c4d5afdd7de93d0b3df5  # v4.1.0
+
+      - name: Build and push image
+        if: steps.tag.outputs.version != ''
+        uses: docker/build-push-action@f9f3042f7e2789586610d6e8b85c8f03e5195baf  # v7.2.0
+        with:
+          context: .
+          platforms: linux/amd64
+          push: true
+          # Without this, the pushed digest can be an attestation manifest, not the image
+          provenance: false
+          tags: |
+            ${{ env.IMAGE }}:latest
+            ${{ env.IMAGE }}:v${{ steps.tag.outputs.version }}
+          build-args: |
+            VERSION=${{ steps.tag.outputs.version }}
+            COMMIT_SHA=${{ github.sha }}
+            BUILD_DATE=${{ github.event.head_commit.timestamp }}
+            NODE_AUTH_TOKEN=${{ secrets.PACKAGES_READ_TOKEN || secrets.GITHUB_TOKEN }}
+            GITHUB_TOKEN=${{ secrets.PACKAGES_READ_TOKEN || secrets.GITHUB_TOKEN }}
+
+      - name: Report a semantic-release failure
+        if: steps.sr.outcome == 'failure'
+        env:
+          VERSION: ${{ steps.tag.outputs.version }}
+        run: |
+          if [ -n "$VERSION" ]; then
+            echo "::warning::semantic-release failed after releasing v$VERSION (usually its PR-comment step, when a merged commit mentions an upstream PR number that does not exist here). The release and the image are fine."
+          else
+            echo "::error::semantic-release failed before releasing - no version was tagged and no image was built. See the semantic-release step log."
+            exit 1
+          fi

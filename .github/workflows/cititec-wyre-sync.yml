@@ -1,0 +1,185 @@
+# Cititec: weekly check for Wyre updates. Cititec-only - never send this file to Wyre
+# (see CITITEC-FORK.md).
+#
+# If WYRE-AI/<repo> main has commits this fork does not have, merge them into a
+# sync/wyre-<sha> branch, run install, build and tests on the result, and open a PR into
+# main for review. If that is not possible (merge conflict, Wyre changed workflow files,
+# PR creation not allowed), open an issue - or, if Issues are off, fail this run with the
+# instructions in its summary so GitHub emails it. Nothing is merged into main or released
+# automatically.
+#
+# Settings that make it work fully (Cititec-Pty-Ltd org and this repo):
+#   - Actions > General > "Allow GitHub Actions to create and approve pull requests"
+#   - Settings > Features > Issues (for the fallback issue)
+# Optional secret WYRE_SYNC_TOKEN (fine-grained token on this repo: Contents, Pull requests,
+# Issues and Workflows read/write): lets the sync push Wyre's workflow changes and makes the
+# PR start CI by itself. Without it the workflow's own token is used.
+#
+# Text from Wyre (commit subjects, file names) only ever reaches the shell through
+# environment variables, never through ${{ }} inside a script.
+name: Cititec Wyre sync
+
+on:
+  schedule:
+    - cron: '0 21 * * 1'   # Monday 21:00 UTC = Tuesday morning in Australia
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+  issues: write
+  packages: read
+
+concurrency:
+  group: cititec-wyre-sync
+  cancel-in-progress: false
+
+env:
+  UPSTREAM: https://github.com/WYRE-AI/unifi-mcp.git
+  RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+  # The checkout has a remote named "upstream" (Wyre). gh prefers a remote with that name, so
+  # without GH_REPO every gh command would target Wyre's repo instead of this fork.
+  GH_REPO: ${{ github.repository }}
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout main
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10  # v6.0.3
+        with:
+          ref: main
+          fetch-depth: 0
+          token: ${{ secrets.WYRE_SYNC_TOKEN || secrets.GITHUB_TOKEN }}
+
+      - name: Compare with Wyre
+        id: cmp
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          git remote add upstream "$UPSTREAM"
+          git fetch upstream main --no-tags
+          behind="$(git rev-list --count HEAD..upstream/main)"
+          sha="$(git rev-parse --short=7 upstream/main)"
+          echo "behind=$behind" >> "$GITHUB_OUTPUT"
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+          echo "branch=sync/wyre-$sha" >> "$GITHUB_OUTPUT"
+          if [ "$behind" = "0" ]; then
+            echo "Up to date with Wyre - nothing to do." | tee -a "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          if gh pr list --state open --json headRefName -q '.[].headRefName' | grep -qx "sync/wyre-$sha"; then
+            echo "A sync PR for Wyre $sha is already open - nothing to do." | tee -a "$GITHUB_STEP_SUMMARY"
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "Wyre has $behind commit(s) this fork does not have (upstream $sha)." | tee -a "$GITHUB_STEP_SUMMARY"
+          git log --no-merges --format='- %h %s' HEAD..upstream/main | head -n 60 > /tmp/wyre-log.md
+          git diff --name-only HEAD...upstream/main -- .github/workflows/ > /tmp/wyre-workflows.txt || true
+
+      - name: Merge Wyre into a sync branch
+        id: merge
+        if: steps.cmp.outputs.behind != '0' && steps.cmp.outputs.skip != 'true'
+        env:
+          BRANCH: ${{ steps.cmp.outputs.branch }}
+          SHA: ${{ steps.cmp.outputs.sha }}
+        run: |
+          git config user.name "cititec-wyre-sync"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git switch -c "$BRANCH"
+          if git merge --no-ff --no-edit upstream/main -m "chore: merge Wyre updates (upstream $SHA)"; then
+            echo "conflict=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "conflict=true" >> "$GITHUB_OUTPUT"
+            git diff --name-only --diff-filter=U > /tmp/wyre-conflicts.txt
+            git merge --abort
+          fi
+
+      - name: Setup Node.js
+        if: steps.merge.outputs.conflict == 'false'
+        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e  # v6.4.0
+        with:
+          node-version: '22'
+          registry-url: 'https://npm.pkg.github.com'
+
+      - name: Install, build and test the merged code
+        id: test
+        if: steps.merge.outputs.conflict == 'false'
+        continue-on-error: true
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.PACKAGES_READ_TOKEN || secrets.GITHUB_TOKEN }}
+        run: |
+          echo "@cititec-pty-ltd:registry=https://npm.pkg.github.com" >> "$NPM_CONFIG_USERCONFIG"
+          echo "@wyre-ai:registry=https://npm.pkg.github.com" >> "$NPM_CONFIG_USERCONFIG"
+          echo "@wyre-technology:registry=https://npm.pkg.github.com" >> "$NPM_CONFIG_USERCONFIG"
+          npm ci
+          npm run build
+          npm test
+
+      - name: Push the sync branch
+        id: push
+        if: steps.merge.outputs.conflict == 'false'
+        continue-on-error: true
+        env:
+          BRANCH: ${{ steps.cmp.outputs.branch }}
+        run: git push -u origin "$BRANCH"
+
+      - name: Open the sync PR
+        id: pr
+        if: steps.merge.outputs.conflict == 'false' && steps.push.outcome == 'success'
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ secrets.WYRE_SYNC_TOKEN || secrets.GITHUB_TOKEN }}
+          BRANCH: ${{ steps.cmp.outputs.branch }}
+          SHA: ${{ steps.cmp.outputs.sha }}
+          BEHIND: ${{ steps.cmp.outputs.behind }}
+          TEST: ${{ steps.test.outcome }}
+        run: |
+          if [ "$TEST" = "success" ]; then result="passed"; else result="**FAILED** - check the workflow run before merging"; fi
+          {
+            printf "Wyre's \`main\` has **%s** commit(s) this fork does not have. They merged without conflicts.\n\n" "$BEHIND"
+            printf "**Install, build and test on the merged code: %s** ([workflow run](%s)).\n\n" "$result" "$RUN_URL"
+            printf "### Wyre commits\n"; cat /tmp/wyre-log.md; printf "\n"
+            printf "### Before merging\n- Check nothing undoes a Cititec-only change (CITITEC-FORK.md lists them).\n- If CI did not start on this PR, close and reopen it.\n\n"
+            printf "### After merging\nThe Cititec release workflow tags a version and pushes the image. Then update the MCP host\n"
+            printf "(internal runbook: Cititec-Pty-Ltd/Cititec \`claude/mcp-host/README.md\`): new image digest, any new tools\n"
+            printf "added to the allowlist, JSON check, test. Update the skill if tools changed.\n"
+          } > /tmp/body.md
+          gh pr create --base main --head "$BRANCH" --title "chore: merge Wyre updates (upstream $SHA)" --body-file /tmp/body.md
+
+      - name: Report when no PR could be opened
+        if: >-
+          steps.merge.outputs.conflict == 'true' ||
+          steps.push.outcome == 'failure' ||
+          steps.pr.outcome == 'failure'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          BRANCH: ${{ steps.cmp.outputs.branch }}
+          SHA: ${{ steps.cmp.outputs.sha }}
+          BEHIND: ${{ steps.cmp.outputs.behind }}
+          CONFLICT: ${{ steps.merge.outputs.conflict }}
+          PUSHED: ${{ steps.push.outcome }}
+        run: |
+          {
+            printf "Wyre's \`main\` has **%s** commit(s) this fork does not have (upstream %s), and the weekly sync could not open a PR.\n\n" "$BEHIND" "$SHA"
+            if [ "$CONFLICT" = "true" ]; then
+              printf "The merge has conflicts in:\n"; sed 's/^/- /' /tmp/wyre-conflicts.txt
+            elif [ "$PUSHED" = "failure" ]; then
+              printf "The merge was clean, but the branch could not be pushed. Usually Wyre changed files under .github/workflows/, which the workflow token may not push:\n"; sed 's/^/- /' /tmp/wyre-workflows.txt
+            else
+              printf "The merge was clean and branch \`%s\` is pushed, but the PR could not be created (\"Allow GitHub Actions to create and approve pull requests\" is off). Open a PR from that branch into main.\n" "$BRANCH"
+            fi
+            printf "\nOtherwise merge by hand as in CITITEC-FORK.md (\"Bring Wyre's updates in\"): \`git fetch upstream --no-tags\`, \`git merge upstream/main\` on a branch, keep Cititec's version of Cititec-only lines, open a PR.\n"
+            printf "Workflow run: %s\n\n### Wyre commits\n" "$RUN_URL"; cat /tmp/wyre-log.md
+          } > /tmp/report.md
+          cat /tmp/report.md >> "$GITHUB_STEP_SUMMARY"
+          title="Wyre updates need attention (upstream $SHA)"
+          if [ "$(gh api "repos/$GITHUB_REPOSITORY" -q .has_issues)" = "true" ]; then
+            if gh issue list --state open --json title -q '.[].title' | grep -qxF "$title"; then
+              echo "Issue already open."
+            elif gh issue create --title "$title" --body-file /tmp/report.md; then
+              exit 0
+            fi
+          fi
+          echo "::error::$title - no issue could be opened, so this run fails to notify you. See the run summary for what to do."
+          exit 1

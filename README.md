@@ -1,3 +1,6 @@
+> **Cititec fork** of [WYRE-AI/unifi-mcp](https://github.com/WYRE-AI/unifi-mcp). Before changing anything, read
+> [CITITEC-FORK.md](CITITEC-FORK.md): which changes go back to Wyre and which stay in this fork.
+
 # UniFi MCP Server
 
 MCP server for [Ubiquiti UniFi](https://www.ui.com/)'s **Cloud Site Manager API** - sites, hosts, devices, WAN/ISP health metrics, and SD-WAN configuration/status, for AI assistants and the WYRE Conduit gateway.
