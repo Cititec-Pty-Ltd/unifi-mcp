@@ -86,6 +86,15 @@ jobs:
         run: |
           git config user.name "cititec-wyre-sync"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          # An earlier run may have pushed this branch but failed to open the PR. Reuse it so
+          # the push below is a no-op instead of a rejected non-fast-forward of a new merge.
+          if git ls-remote --exit-code --heads origin "$BRANCH" > /dev/null; then
+            echo "Branch $BRANCH already exists - reusing it." | tee -a "$GITHUB_STEP_SUMMARY"
+            git fetch origin "refs/heads/$BRANCH:refs/remotes/origin/$BRANCH"
+            git switch -c "$BRANCH" --track "origin/$BRANCH"
+            echo "conflict=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
           git switch -c "$BRANCH"
           if git merge --no-ff --no-edit upstream/main -m "chore: merge Wyre updates (upstream $SHA)"; then
             echo "conflict=false" >> "$GITHUB_OUTPUT"
@@ -177,6 +186,7 @@ jobs:
           if [ "$(gh api "repos/$GITHUB_REPOSITORY" -q .has_issues)" = "true" ]; then
             if gh issue list --state open --json title -q '.[].title' | grep -qxF "$title"; then
               echo "Issue already open."
+              exit 0
             elif gh issue create --title "$title" --body-file /tmp/report.md; then
               exit 0
             fi
