@@ -4,16 +4,17 @@
  * no per-request token exchange.
  *
  * Structurally verified (checked directly): this connector's own code makes
- * zero mutating calls - every function in client.ts calls one of the 9
- * dedicated read operations, and the connector-proxy path is never
- * referenced under any name.
+ * zero mutating calls. The 9 Site Manager functions in client.ts are reads
+ * (one is a filtered-read POST), and networkGet only sends GET to fixed
+ * Network API paths through the connector proxy - no tool takes a
+ * free-form path.
  *
  * Vendor-documented, not independently verified (hedged deliberately):
  * Ubiquiti's own docs describe the key as read-only ("cannot be used to
  * make modifications to your UniFi infrastructure"). The live spec defines
  * a 10th path, `/v1/connector/consoles/{id}/*path`, a generic reverse-proxy
- * supporting all 5 HTTP methods that this connector deliberately excludes
- * (see README's Scope section). Whether UI.com's backend actually blocks
+ * supporting all 5 HTTP methods; this connector uses it for GET only (see
+ * README's Authentication section). Whether UI.com's backend actually blocks
  * writes sent through that path, versus it being documented policy rather
  * than a hard technical block, has not been tested by WYRE.
  */
