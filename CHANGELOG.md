@@ -6,6 +6,10 @@ Per-version release notes for tagged releases are published on the [GitHub Relea
 
 ## [Unreleased]
 
+### Fixed
+
+- A rate-limited request (HTTP 429, or a 503 with `Retry-After`) is now retried up to twice, waiting for the `Retry-After` the API sends (or 1 s then 2 s without one). Waits are capped at 10 s each and 20 s in total, and every attempt gets its own timeout. When the wait would be longer, the tool error says how long to wait (`Try again in N s.`) instead of only "rate-limited".
+
 ### Added
 
 - 16 read-only `unifi_network_*` tools for a console's local UniFi Network API, reached through the Site Manager connector proxy with the same UI.com API key: Network application info, local sites, pending and adopted devices, device details and latest statistics, connected clients, WANs, VPN tunnels and servers, networks, WiFi broadcasts, firewall policies and zones, and ACL rules. Each tool sends `GET` to one fixed path, with IDs URL-encoded; there is no free-form path and no mutating verb. Client, device and configuration tools are listed in `SENSITIVE_NETWORK_TOOLS` for admin-gating. Requires console firmware 5.0.3 or later; the connector allows 100 requests per minute per console.
