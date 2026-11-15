@@ -53,12 +53,20 @@ describe('handleSiteTool', () => {
   });
 
   it('surfaces a 429 as a readable rate-limit error', async () => {
-    fetchMock.mockResolvedValueOnce(jsonResponse({ message: 'too many requests' }, 429));
+    // Retry-After longer than the client waits for: reported at once, not retried.
+    fetchMock.mockResolvedValueOnce(
+      new Response(JSON.stringify({ message: 'too many requests' }), {
+        status: 429,
+        headers: { 'Content-Type': 'application/json', 'Retry-After': '60' },
+      })
+    );
 
     const result = await runWithCredentials(creds, () => handleSiteTool('unifi_list_sites', {}));
 
     expect(result.isError).toBe(true);
     expect(textOf(result)).toMatch(/rate-limited/i);
+    expect(textOf(result)).toMatch(/try again in 60 s/i);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
   it('returns a credential error without calling fetch when no key is configured', async () => {
