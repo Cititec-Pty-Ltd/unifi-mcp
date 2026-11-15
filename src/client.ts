@@ -1,5 +1,6 @@
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { logger } from './utils/logger.js';
+import { fetchWithRateLimitRetry, retryAfterSecondsOf } from './rate-limit.js';
 import { UniFiApiError, UniFiAuthError, UniFiRateLimitError } from './types.js';
 import type {
   GetIspMetricsParams,
@@ -63,7 +64,9 @@ async function request<T>(
 ): Promise<T> {
   const qs = options.query ? buildQuery(options.query).toString() : '';
   const url = `${BASE_URL}${path}${qs ? `?${qs}` : ''}`;
-  const res = await fetch(url, {
+  // A short 429 is retried (bounded, honouring Retry-After) inside
+  // fetchWithRateLimitRetry; each attempt gets its own timeout.
+  const res = await fetchWithRateLimitRetry(url, path, () => ({
     method,
     headers: {
       'X-API-Key': creds.apiKey,
@@ -72,7 +75,7 @@ async function request<T>(
     },
     body: options.body !== undefined ? JSON.stringify(options.body) : undefined,
     signal: AbortSignal.timeout(options.timeoutMs ?? 15_000),
-  });
+  }));
 
   // 401 (invalid/revoked API key) and 429 (rate-limited) are distinct
   // failure modes with distinct remediations - grouping them under one
@@ -82,7 +85,12 @@ async function request<T>(
     throw new UniFiAuthError(`UniFi rejected the API key (HTTP 401): ${path}`);
   }
   if (res.status === 429) {
-    throw new UniFiRateLimitError(`UniFi rate-limited the request (HTTP 429): ${path}`);
+    const retryAfterSeconds = retryAfterSecondsOf(res);
+    throw new UniFiRateLimitError(
+      `UniFi rate-limited the request (HTTP 429): ${path}.` +
+        (retryAfterSeconds !== undefined ? ` Try again in ${retryAfterSeconds} s.` : ' Try again in a minute.'),
+      retryAfterSeconds
+    );
   }
   if (!res.ok) {
     throw new UniFiApiError(`UniFi ${path} failed: HTTP ${res.status}`, res.status);
@@ -222,14 +230,41 @@ export async function networkGet<T>(
     throw new Error(`Network API path must start with /v1/: ${path}`);
   }
   const base = `/v1/connector/consoles/${encodeURIComponent(consoleId)}`;
+  // Once a prefix has worked for a console, use only that one: a 404 then
+  // means the resource itself was not found, and the fallback would only
+  // spend another request of the console's 100/minute.
+  const known = workingPrefix.get(consoleId);
+  if (known) {
+    return request<T>(creds, 'GET', `${base}/${known}${path}`, { query, timeoutMs: 30_000 });
+  }
   let lastError: unknown;
   for (const prefix of NETWORK_CONNECTOR_PREFIXES) {
     try {
-      return await request<T>(creds, 'GET', `${base}/${prefix}${path}`, { query, timeoutMs: 30_000 });
+      const result = await request<T>(creds, 'GET', `${base}/${prefix}${path}`, { query, timeoutMs: 30_000 });
+      rememberPrefix(consoleId, prefix);
+      return result;
     } catch (err) {
       lastError = err;
       if (!(err instanceof UniFiApiError && err.status === 404)) throw err;
     }
   }
   throw lastError;
+}
+
+/** The connector prefix that last worked for each console (bounded, oldest dropped first). */
+const workingPrefix = new Map<string, (typeof NETWORK_CONNECTOR_PREFIXES)[number]>();
+const MAX_REMEMBERED_CONSOLES = 500;
+
+function rememberPrefix(consoleId: string, prefix: (typeof NETWORK_CONNECTOR_PREFIXES)[number]): void {
+  workingPrefix.delete(consoleId);
+  workingPrefix.set(consoleId, prefix);
+  if (workingPrefix.size > MAX_REMEMBERED_CONSOLES) {
+    const oldest = workingPrefix.keys().next().value;
+    if (oldest !== undefined) workingPrefix.delete(oldest);
+  }
+}
+
+/** Test hook: forget the remembered prefixes. */
+export function resetNetworkPrefixCache(): void {
+  workingPrefix.clear();
 }

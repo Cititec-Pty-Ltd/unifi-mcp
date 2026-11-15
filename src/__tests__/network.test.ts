@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { NETWORK_TOOLS, SENSITIVE_NETWORK_TOOLS, handleNetworkTool } from '../tools/network.js';
-import { runWithCredentials } from '../client.js';
+import { resetNetworkPrefixCache, runWithCredentials } from '../client.js';
 import { jsonResponse, textOf } from './test-helpers.js';
 
 const CONSOLE = 'ABC123:42';
@@ -14,10 +14,53 @@ describe('handleNetworkTool', () => {
   beforeEach(() => {
     vi.stubGlobal('fetch', fetchMock);
     fetchMock.mockReset();
+    resetNetworkPrefixCache();
   });
 
   afterEach(() => {
     vi.unstubAllGlobals();
+  });
+
+  it('remembers the working prefix per console, so later calls make one request', async () => {
+    fetchMock.mockResolvedValueOnce(jsonResponse({ message: 'not found' }, 404));
+    fetchMock.mockResolvedValueOnce(jsonResponse({ data: [] }));
+    fetchMock.mockResolvedValueOnce(jsonResponse({ data: [] }));
+
+    await runWithCredentials(creds, () => handleNetworkTool('unifi_network_list_sites', { consoleId: CONSOLE }));
+    await runWithCredentials(creds, () => handleNetworkTool('unifi_network_list_sites', { consoleId: CONSOLE }));
+
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+    expect(new URL(fetchMock.mock.calls[2][0] as string).pathname).toBe(
+      `/v1/connector/consoles/${encodeURIComponent(CONSOLE)}/network/integration/v1/sites`
+    );
+  });
+
+  it('treats a 404 on the remembered prefix as not found, without a second request', async () => {
+    fetchMock.mockResolvedValueOnce(jsonResponse({ data: [] }));
+    fetchMock.mockResolvedValueOnce(jsonResponse({ message: 'not found' }, 404));
+
+    await runWithCredentials(creds, () => handleNetworkTool('unifi_network_list_sites', { consoleId: CONSOLE }));
+    const result = await runWithCredentials(creds, () =>
+      handleNetworkTool('unifi_network_get_device', { consoleId: CONSOLE, siteId: SITE, deviceId: DEVICE })
+    );
+
+    expect(result.isError).toBe(true);
+    expect(textOf(result)).toMatch(/HTTP 404/);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it('does not share a remembered prefix between consoles', async () => {
+    fetchMock.mockResolvedValueOnce(jsonResponse({ data: [] }));
+    fetchMock.mockResolvedValueOnce(jsonResponse({ message: 'not found' }, 404));
+    fetchMock.mockResolvedValueOnce(jsonResponse({ data: [] }));
+
+    await runWithCredentials(creds, () => handleNetworkTool('unifi_network_list_sites', { consoleId: CONSOLE }));
+    const result = await runWithCredentials(creds, () =>
+      handleNetworkTool('unifi_network_list_sites', { consoleId: 'OTHER:1' })
+    );
+
+    expect(result.isError).toBeUndefined();
+    expect(fetchMock).toHaveBeenCalledTimes(3);
   });
 
   it('lists console sites with GET through the connector proxy path', async () => {
