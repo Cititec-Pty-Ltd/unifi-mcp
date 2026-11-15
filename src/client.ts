@@ -230,14 +230,41 @@ export async function networkGet<T>(
     throw new Error(`Network API path must start with /v1/: ${path}`);
   }
   const base = `/v1/connector/consoles/${encodeURIComponent(consoleId)}`;
+  // Once a prefix has worked for a console, use only that one: a 404 then
+  // means the resource itself was not found, and the fallback would only
+  // spend another request of the console's 100/minute.
+  const known = workingPrefix.get(consoleId);
+  if (known) {
+    return request<T>(creds, 'GET', `${base}/${known}${path}`, { query, timeoutMs: 30_000 });
+  }
   let lastError: unknown;
   for (const prefix of NETWORK_CONNECTOR_PREFIXES) {
     try {
-      return await request<T>(creds, 'GET', `${base}/${prefix}${path}`, { query, timeoutMs: 30_000 });
+      const result = await request<T>(creds, 'GET', `${base}/${prefix}${path}`, { query, timeoutMs: 30_000 });
+      rememberPrefix(consoleId, prefix);
+      return result;
     } catch (err) {
       lastError = err;
       if (!(err instanceof UniFiApiError && err.status === 404)) throw err;
     }
   }
   throw lastError;
+}
+
+/** The connector prefix that last worked for each console (bounded, oldest dropped first). */
+const workingPrefix = new Map<string, (typeof NETWORK_CONNECTOR_PREFIXES)[number]>();
+const MAX_REMEMBERED_CONSOLES = 500;
+
+function rememberPrefix(consoleId: string, prefix: (typeof NETWORK_CONNECTOR_PREFIXES)[number]): void {
+  workingPrefix.delete(consoleId);
+  workingPrefix.set(consoleId, prefix);
+  if (workingPrefix.size > MAX_REMEMBERED_CONSOLES) {
+    const oldest = workingPrefix.keys().next().value;
+    if (oldest !== undefined) workingPrefix.delete(oldest);
+  }
+}
+
+/** Test hook: forget the remembered prefixes. */
+export function resetNetworkPrefixCache(): void {
+  workingPrefix.clear();
 }

@@ -9,6 +9,7 @@ Per-version release notes for tagged releases are published on the [GitHub Relea
 ### Fixed
 
 - A rate-limited request (HTTP 429, or a 503 with `Retry-After`) is now retried up to twice, waiting for the `Retry-After` the API sends (or 1 s then 2 s without one). Waits are capped at 10 s each and 20 s in total, and every attempt gets its own timeout. When the wait would be longer, the tool error says how long to wait (`Try again in N s.`) instead of only "rate-limited".
+- `unifi_network_*` tools remember which connector path form (`proxy/network/integration` or `network/integration`) worked for each console, so the 404 fallback costs an extra request only on the first call to a console, not on every call. The connector allows 100 requests per minute per console. A 404 on the remembered form is reported as not found.
 
 ### Added
 
