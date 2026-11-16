@@ -23,6 +23,9 @@ import type {
 
 export const BASE_URL = 'https://api.ui.com';
 
+/** Wait reported for a 429 without Retry-After. Never used as a delay. */
+const DEFAULT_RETRY_AFTER_SECONDS = 60;
+
 // Request-scoped credential store. In gateway mode the HTTP layer runs each
 // request inside runWithCredentials({apiKey}); getCredentials() reads from
 // it. Falls back to process.env for stdio/single-tenant mode.
@@ -85,10 +88,11 @@ async function request<T>(
     throw new UniFiAuthError(`UniFi rejected the API key (HTTP 401): ${path}`);
   }
   if (res.status === 429) {
-    const retryAfterSeconds = retryAfterSecondsOf(res);
+    // Same N in the message and in retryAfterSeconds, at least 1; 60 s when
+    // UniFi sends no Retry-After (its connector limit is per minute).
+    const retryAfterSeconds = retryAfterSecondsOf(res) ?? DEFAULT_RETRY_AFTER_SECONDS;
     throw new UniFiRateLimitError(
-      `UniFi rate-limited the request (HTTP 429): ${path}.` +
-        (retryAfterSeconds !== undefined ? ` Try again in ${retryAfterSeconds} s.` : ' Try again in a minute.'),
+      `UniFi rate-limited the request (HTTP 429): ${path}. Try again in ${retryAfterSeconds} s.`,
       retryAfterSeconds
     );
   }

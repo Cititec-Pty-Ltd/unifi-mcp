@@ -8,7 +8,7 @@ Per-version release notes for tagged releases are published on the [GitHub Relea
 
 ### Fixed
 
-- A rate-limited request (HTTP 429, or a 503 with `Retry-After`) is now retried up to twice, waiting for the `Retry-After` the API sends (or 1 s then 2 s without one). Waits are capped at 10 s each and 20 s in total, and every attempt gets its own timeout. When the wait would be longer, the tool error says how long to wait (`Try again in N s.`) instead of only "rate-limited".
+- A rate-limited request (HTTP 429, or a 503 with `Retry-After`) is now retried once when the API sends a `Retry-After` of at most 10 s, after waiting that long; the retry gets its own timeout. With no `Retry-After`, or a longer one, the error is returned at once. The tool error says how long to wait (`Try again in N s.`, 60 s when the API sent no `Retry-After`), and `UniFiRateLimitError.retryAfterSeconds` carries the same N (at least 1).
 
 ### Added
 
