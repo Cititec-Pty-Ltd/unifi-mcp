@@ -27,8 +27,11 @@ export class UniFiAuthError extends Error {}
 
 /** Thrown when UniFi rate-limits the request (HTTP 429) - distinct from an auth failure. */
 export class UniFiRateLimitError extends Error {
-  /** Seconds UniFi asked us to wait (Retry-After), when it said. */
-  constructor(message: string, readonly retryAfterSeconds?: number) {
+  /**
+   * Seconds to wait before trying again (at least 1): UniFi's Retry-After, or
+   * 60 when it sent none. The message says "Try again in N s." with this N.
+   */
+  constructor(message: string, readonly retryAfterSeconds: number) {
     super(message);
   }
 }
