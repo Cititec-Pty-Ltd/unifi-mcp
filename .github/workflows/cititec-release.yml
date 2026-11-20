@@ -78,6 +78,15 @@ jobs:
           tag="$(git tag --points-at HEAD | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | head -n 1 || true)"
           echo "version=${tag#v}" >> "$GITHUB_OUTPUT"
           if [ -n "$tag" ]; then echo "Released $tag"; else echo "No release on this commit - no image built"; fi
+          # Only the newest release moves :latest, so re-running an older release run
+          # rebuilds its own version tag without rolling :latest back.
+          newest="$(git tag -l 'v*' | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tail -n 1 || true)"
+          if [ -n "$tag" ] && [ "$tag" = "$newest" ]; then
+            echo "latest=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "latest=false" >> "$GITHUB_OUTPUT"
+            if [ -n "$tag" ]; then echo "$tag is not the newest release ($newest) - :latest is left as it is"; fi
+          fi
 
       - name: Log in to ghcr.io
         if: steps.tag.outputs.version != ''
@@ -100,8 +109,9 @@ jobs:
           push: true
           # Without this, the pushed digest can be an attestation manifest, not the image
           provenance: false
+          # An empty line (not the newest release) is ignored.
           tags: |
-            ${{ env.IMAGE }}:latest
+            ${{ steps.tag.outputs.latest == 'true' && format('{0}:latest', env.IMAGE) || '' }}
             ${{ env.IMAGE }}:v${{ steps.tag.outputs.version }}
           build-args: |
             VERSION=${{ steps.tag.outputs.version }}
