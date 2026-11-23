@@ -10,6 +10,7 @@ Per-version release notes for tagged releases are published on the [GitHub Relea
 
 - A rate-limited request (HTTP 429, or a 503 with `Retry-After`) is now retried once when the API sends a `Retry-After` of at most 10 s, after waiting that long; the retry gets its own timeout. With no `Retry-After`, or a longer one, the error is returned at once. The tool error says how long to wait (`Try again in N s.`, 60 s when the API sent no `Retry-After`), and `UniFiRateLimitError.retryAfterSeconds` carries the same N (at least 1).
 - `unifi_network_*` tools remember which connector path form (`proxy/network/integration` or `network/integration`) worked for each console, so the 404 fallback costs an extra request only on the first call to a console, not on every call. The connector allows 100 requests per minute per console. A 404 on the remembered form is reported as not found.
+- The HTTP transport no longer exits on a malformed request (WYREAI-741). The request target was parsed against the client-supplied `Host` header, and a value that does not parse (or a target such as `//`) threw inside the request listener before authentication. The target is now parsed against a fixed base, so `Host` is no longer consulted, and a target that still cannot be parsed gets a `400` JSON response while the server keeps running.
 
 ### Added
 
