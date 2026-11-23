@@ -14,6 +14,13 @@ Per-version release notes for tagged releases are published on the [GitHub Relea
   target is now parsed against a fixed base, so `Host` is no longer consulted, and a target
   that still cannot be parsed gets a `400` JSON response while the server keeps running.
 
+- **Rate-limited requests are retried once and say how long to wait.** A request that gets
+  HTTP 429, or a 503 with `Retry-After`, is retried once when UniFi sends a `Retry-After` of at
+  most 10 s, after waiting that long; each attempt gets its own timeout. With no `Retry-After`,
+  or a longer one, the error is returned at once (no invented backoff). The tool error says
+  `Try again in N s.` (60 s when UniFi sends no `Retry-After`), and
+  `UniFiRateLimitError.retryAfterSeconds` holds the same N (at least 1).
+
 ### Added
 
 - Initial v1 release: 9 read-only tools covering every dedicated read operation on the UniFi Cloud Site Manager API (sites, hosts, devices, ISP/WAN metrics, SD-WAN configs and status). Static `X-API-Key` authentication against a UI.com account - no OAuth. Deliberately targets the Cloud Site Manager API only; the local per-controller Network API (client-level detail, VLANs/WLANs/firewall rules, which the cloud API does not expose as dedicated operations) is out of scope for this connector by design. The live spec (`developer.ui.com/site-manager/v1.0.0/openapi.json`, fetched directly) defines a 10th path, `/v1/connector/consoles/{id}/*path` - a generic reverse-proxy into a console's local API, documented as accepting GET/POST/PUT/PATCH/DELETE - which this connector's code deliberately never calls (structurally verified: no such call exists anywhere in `src/`). Whether UI.com's backend actually enforces "read-only" server-side against that path is a separate, unverified claim - WYRE has not tested a write call against it. See README's Scope and Authentication sections for the full two-tier explanation.

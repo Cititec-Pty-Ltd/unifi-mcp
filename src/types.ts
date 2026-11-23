@@ -25,7 +25,15 @@ export interface UniFiCredentials {
 export class UniFiAuthError extends Error {}
 
 /** Thrown when UniFi rate-limits the request (HTTP 429) - distinct from an auth failure. */
-export class UniFiRateLimitError extends Error {}
+export class UniFiRateLimitError extends Error {
+  /**
+   * Seconds to wait before trying again (at least 1): UniFi's Retry-After, or
+   * 60 when it sent none. The message says "Try again in N s." with this N.
+   */
+  constructor(message: string, readonly retryAfterSeconds: number) {
+    super(message);
+  }
+}
 
 /** Thrown for any other non-2xx / unexpected vendor response. */
 export class UniFiApiError extends Error {

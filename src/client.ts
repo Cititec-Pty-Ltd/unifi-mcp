@@ -1,5 +1,6 @@
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { logger } from './utils/logger.js';
+import { fetchWithRateLimitRetry, retryAfterSecondsOf } from './rate-limit.js';
 import { UniFiApiError, UniFiAuthError, UniFiRateLimitError } from './types.js';
 import type {
   GetIspMetricsParams,
@@ -21,6 +22,9 @@ import type {
 } from './types.js';
 
 export const BASE_URL = 'https://api.ui.com';
+
+/** Wait reported for a 429 without Retry-After. Never used as a delay. */
+const DEFAULT_RETRY_AFTER_SECONDS = 60;
 
 // Request-scoped credential store. In gateway mode the HTTP layer runs each
 // request inside runWithCredentials({apiKey}); getCredentials() reads from
@@ -63,7 +67,9 @@ async function request<T>(
 ): Promise<T> {
   const qs = options.query ? buildQuery(options.query).toString() : '';
   const url = `${BASE_URL}${path}${qs ? `?${qs}` : ''}`;
-  const res = await fetch(url, {
+  // A short 429 is retried (bounded, honouring Retry-After) inside
+  // fetchWithRateLimitRetry; each attempt gets its own timeout.
+  const res = await fetchWithRateLimitRetry(url, path, () => ({
     method,
     headers: {
       'X-API-Key': creds.apiKey,
@@ -72,7 +78,7 @@ async function request<T>(
     },
     body: options.body !== undefined ? JSON.stringify(options.body) : undefined,
     signal: AbortSignal.timeout(15_000),
-  });
+  }));
 
   // 401 (invalid/revoked API key) and 429 (rate-limited) are distinct
   // failure modes with distinct remediations - grouping them under one
@@ -82,7 +88,13 @@ async function request<T>(
     throw new UniFiAuthError(`UniFi rejected the API key (HTTP 401): ${path}`);
   }
   if (res.status === 429) {
-    throw new UniFiRateLimitError(`UniFi rate-limited the request (HTTP 429): ${path}`);
+    // Same N in the message and in retryAfterSeconds, at least 1; 60 s when
+    // UniFi sends no Retry-After (its connector limit is per minute).
+    const retryAfterSeconds = retryAfterSecondsOf(res) ?? DEFAULT_RETRY_AFTER_SECONDS;
+    throw new UniFiRateLimitError(
+      `UniFi rate-limited the request (HTTP 429): ${path}. Try again in ${retryAfterSeconds} s.`,
+      retryAfterSeconds
+    );
   }
   if (!res.ok) {
     throw new UniFiApiError(`UniFi ${path} failed: HTTP ${res.status}`, res.status);
