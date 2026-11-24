@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { NETWORK_TOOLS, SENSITIVE_NETWORK_TOOLS, handleNetworkTool } from '../tools/network.js';
-import { resetNetworkPrefixCache, runWithCredentials } from '../client.js';
+import { handleHostTool } from '../tools/hosts.js';
+import { resetHostOwnershipCache, resetNetworkPrefixCache, runWithCredentials } from '../client.js';
 import { jsonResponse, textOf } from './test-helpers.js';
 
 const CONSOLE = 'ABC123:42';
@@ -15,6 +16,7 @@ describe('handleNetworkTool', () => {
     vi.stubGlobal('fetch', fetchMock);
     fetchMock.mockReset();
     resetNetworkPrefixCache();
+    resetHostOwnershipCache();
   });
 
   afterEach(() => {
@@ -103,7 +105,100 @@ describe('handleNetworkTool', () => {
 
     expect(result.isError).toBe(true);
     expect(textOf(result)).toMatch(/HTTP 502/);
+    expect(textOf(result)).not.toMatch(/owned|ownership/);
     expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  describe('HTTP 403 from the connector', () => {
+    const proxyPath = `/v1/connector/consoles/${encodeURIComponent(CONSOLE)}/proxy/network/integration/v1/sites`;
+
+    async function listHosts(apiKey: string, owner: boolean): Promise<void> {
+      fetchMock.mockResolvedValueOnce(jsonResponse({ data: [{ id: CONSOLE, owner }] }));
+      await runWithCredentials({ apiKey }, () => handleHostTool('unifi_list_hosts', {}));
+    }
+
+    async function listSites(apiKey = creds.apiKey) {
+      return runWithCredentials({ apiKey }, () => handleNetworkTool('unifi_network_list_sites', { consoleId: CONSOLE }));
+    }
+
+    it('explains the ownership requirement when ownership is not known, with status and path but no key', async () => {
+      fetchMock.mockResolvedValueOnce(jsonResponse({ message: 'forbidden' }, 403));
+
+      const result = await listSites();
+
+      expect(result.isError).toBe(true);
+      const text = textOf(result);
+      expect(text).toBe(
+        `Error: UniFi refused access to this console's Network application (HTTP 403: GET ${proxyPath}). ` +
+          "The cloud connector only works for consoles owned by the API key's UI.com account; this console is likely shared with it as an admin, not owned (owner: false in unifi_list_hosts confirms this). " +
+          'Site Manager tools (unifi_list_hosts, unifi_list_devices, unifi_get_isp_metrics...) still work. ' +
+          "Fix: transfer the console's ownership to the key's account, or use the console's local Network API."
+      );
+      expect(text).not.toContain(creds.apiKey);
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+    });
+
+    it('says definitively "not owned" when unifi_list_hosts showed owner: false', async () => {
+      await listHosts(creds.apiKey, false);
+      fetchMock.mockResolvedValueOnce(jsonResponse({ message: 'forbidden' }, 403));
+
+      const text = textOf(await listSites());
+
+      expect(text).toContain('this console is not owned by it (unifi_list_hosts shows owner: false)');
+      expect(text).toContain("Fix: transfer the console's ownership");
+      expect(text).not.toContain('likely');
+      expect(fetchMock).toHaveBeenCalledTimes(2);
+    });
+
+    it('points at key permissions and firmware when the account owns the console', async () => {
+      await listHosts(creds.apiKey, true);
+      fetchMock.mockResolvedValueOnce(jsonResponse({ message: 'forbidden' }, 403));
+
+      const text = textOf(await listSites());
+
+      expect(text).toContain(`(HTTP 403: GET ${proxyPath})`);
+      expect(text).toContain("The API key's UI.com account owns this console, so ownership is not the cause");
+      expect(text).toContain("check the API key's permissions");
+      expect(text).not.toContain('transfer');
+    });
+
+    it('does not use ownership seen with a different API key', async () => {
+      await listHosts('other-key', false);
+      fetchMock.mockResolvedValueOnce(jsonResponse({ message: 'forbidden' }, 403));
+
+      expect(textOf(await listSites())).toContain('likely shared');
+    });
+
+    it('is terminal: no fallback to the other prefix, and no prefix is remembered', async () => {
+      fetchMock.mockResolvedValueOnce(jsonResponse({ message: 'forbidden' }, 403));
+      fetchMock.mockResolvedValueOnce(jsonResponse({ data: [] }));
+
+      await listSites();
+      const ok = await listSites();
+
+      expect(ok.isError).toBeUndefined();
+      expect(fetchMock).toHaveBeenCalledTimes(2);
+      // The second call starts from the first prefix again.
+      expect(new URL(fetchMock.mock.calls[1][0] as string).pathname).toBe(proxyPath);
+    });
+
+    it('on the remembered prefix is terminal and keeps that prefix', async () => {
+      fetchMock.mockResolvedValueOnce(jsonResponse({ message: 'not found' }, 404));
+      fetchMock.mockResolvedValueOnce(jsonResponse({ data: [] }));
+      fetchMock.mockResolvedValueOnce(jsonResponse({ message: 'forbidden' }, 403));
+      fetchMock.mockResolvedValueOnce(jsonResponse({ data: [] }));
+
+      await listSites();
+      const forbidden = await listSites();
+      await listSites();
+
+      expect(textOf(forbidden)).toContain(`/consoles/${encodeURIComponent(CONSOLE)}/network/integration/v1/sites)`);
+      expect(textOf(forbidden)).toMatch(/HTTP 403/);
+      expect(fetchMock).toHaveBeenCalledTimes(4);
+      expect(new URL(fetchMock.mock.calls[3][0] as string).pathname).toBe(
+        `/v1/connector/consoles/${encodeURIComponent(CONSOLE)}/network/integration/v1/sites`
+      );
+    });
   });
 
   it('passes offset, limit and filter for a site device list', async () => {

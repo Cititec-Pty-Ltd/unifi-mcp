@@ -168,7 +168,7 @@ const SPECS: NetworkToolSpec[] = [
 ];
 
 const COMMON_NOTE =
-  ' Read-only; reached through the UniFi cloud connector, so the console must be online and on firmware 5.0.3 or later (100 requests/minute per console).';
+  " Read-only; reached through the UniFi cloud connector, so the console must be online, on firmware 5.0.3 or later, and, for a standard API key, owned by the key's UI.com account (owner: true in unifi_list_hosts; a console only shared with it returns HTTP 403). 100 requests/minute per console.";
 
 function buildTool(spec: NetworkToolSpec): Tool {
   const properties: Record<string, object> = {
