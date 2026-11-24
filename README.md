@@ -37,6 +37,8 @@ This connector does **not** expose it as a wildcard passthrough. The `unifi_netw
 
 The Network spec's server URL is `/v1/connector/consoles/{id}/proxy/network/integration`, while the connector's own example omits `/proxy/`. `networkGet` tries the spec's form first and retries once without `/proxy/` only on HTTP 404.
 
+**HTTP 403 on a console that is shared, not owned.** With a standard API key, the connector answers HTTP 403 for a console that is shared with the key's UI.com account as an admin but not owned by it (`owner: false` in `unifi_list_hosts`); Site Manager tools still work for that console. A 403 is never retried with the other path form. The error says so, and keeps the status and path. If `unifi_list_hosts` or `unifi_get_host` has already returned that console's `owner` flag for the same key, the error says definitively whether it is owned (no extra request is made to find out). To use the `unifi_network_*` tools on such a console, transfer its ownership to the key's account, or use the console's local Network API.
+
 ## Configuration
 
 Copy [`.env.example`](.env.example) and set the variables below.

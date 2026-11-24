@@ -1,4 +1,5 @@
 import { AsyncLocalStorage } from 'node:async_hooks';
+import { createHash } from 'node:crypto';
 import { logger } from './utils/logger.js';
 import { fetchWithRateLimitRetry, retryAfterSecondsOf } from './rate-limit.js';
 import { UniFiApiError, UniFiAuthError, UniFiRateLimitError } from './types.js';
@@ -135,12 +136,50 @@ export async function listHosts(
   creds: UniFiCredentials,
   params: ListHostsParams = {}
 ): Promise<PagedResponse<UniFiHost>> {
-  return doGet(creds, '/v1/hosts', { ...params });
+  const res = await doGet<PagedResponse<UniFiHost>>(creds, '/v1/hosts', { ...params });
+  if (Array.isArray(res?.data)) for (const host of res.data) rememberOwnership(creds, host);
+  return res;
 }
 
 /** GET /v1/hosts/{id} - detailed information about a specific host. */
 export async function getHost(creds: UniFiCredentials, id: string): Promise<SingleResponse<UniFiHost>> {
-  return doGet(creds, `/v1/hosts/${encodeURIComponent(id)}`);
+  const res = await doGet<SingleResponse<UniFiHost>>(creds, `/v1/hosts/${encodeURIComponent(id)}`);
+  rememberOwnership(creds, res?.data);
+  return res;
+}
+
+// Host ownership seen in unifi_list_hosts / unifi_get_host responses, used only
+// to explain a connector 403. Filled passively - no request is ever made just
+// to look it up. Keyed by a hash of the API key (never the key itself) and the
+// host ID, because in gateway mode one process serves several accounts and a
+// console owned by one account can be only shared with another.
+const hostOwnership = new Map<string, boolean>();
+const MAX_REMEMBERED_HOSTS = 2000;
+
+function ownershipKey(creds: UniFiCredentials, hostId: string): string {
+  const account = createHash('sha256').update(creds.apiKey).digest('hex').slice(0, 16);
+  return `${account}:${hostId}`;
+}
+
+function rememberOwnership(creds: UniFiCredentials, host: UniFiHost | undefined): void {
+  if (!host || typeof host.id !== 'string' || typeof host.owner !== 'boolean') return;
+  const key = ownershipKey(creds, host.id);
+  hostOwnership.delete(key);
+  hostOwnership.set(key, host.owner);
+  if (hostOwnership.size > MAX_REMEMBERED_HOSTS) {
+    const oldest = hostOwnership.keys().next().value;
+    if (oldest !== undefined) hostOwnership.delete(oldest);
+  }
+}
+
+/** The host's `owner` flag from an earlier hosts response for these credentials, or undefined if not seen. */
+export function knownHostOwnership(creds: UniFiCredentials, hostId: string): boolean | undefined {
+  return hostOwnership.get(ownershipKey(creds, hostId));
+}
+
+/** Test hook: forget remembered host ownership. */
+export function resetHostOwnershipCache(): void {
+  hostOwnership.clear();
 }
 
 // ---------------------------------------------------------------------
@@ -234,17 +273,31 @@ export async function networkGet<T>(
     throw new Error(`Network API path must start with /v1/: ${path}`);
   }
   const base = `/v1/connector/consoles/${encodeURIComponent(consoleId)}`;
+  const get = async (prefix: string): Promise<T> => {
+    const fullPath = `${base}/${prefix}${path}`;
+    try {
+      return await request<T>(creds, 'GET', fullPath, { query, timeoutMs: 30_000 });
+    } catch (err) {
+      // A 403 is about access to the console, not the path form: it is
+      // terminal, never retried with the other prefix, and never changes the
+      // remembered prefix.
+      if (err instanceof UniFiApiError && err.status === 403) {
+        throw new UniFiApiError(connectorForbiddenMessage(fullPath, knownHostOwnership(creds, consoleId)), 403);
+      }
+      throw err;
+    }
+  };
   // Once a prefix has worked for a console, use only that one: a 404 then
   // means the resource itself was not found, and the fallback would only
   // spend another request of the console's 100/minute.
   const known = workingPrefix.get(consoleId);
   if (known) {
-    return request<T>(creds, 'GET', `${base}/${known}${path}`, { query, timeoutMs: 30_000 });
+    return get(known);
   }
   let lastError: unknown;
   for (const prefix of NETWORK_CONNECTOR_PREFIXES) {
     try {
-      const result = await request<T>(creds, 'GET', `${base}/${prefix}${path}`, { query, timeoutMs: 30_000 });
+      const result = await get(prefix);
       rememberPrefix(consoleId, prefix);
       return result;
     } catch (err) {
@@ -253,6 +306,32 @@ export async function networkGet<T>(
     }
   }
   throw lastError;
+}
+
+const SITE_MANAGER_STILL_WORKS =
+  'Site Manager tools (unifi_list_hosts, unifi_list_devices, unifi_get_isp_metrics...) still work.';
+
+/**
+ * Explains a connector 403. `owner` is the host's `owner` flag when a hosts
+ * response for the same credentials has shown it, else undefined.
+ */
+export function connectorForbiddenMessage(path: string, owner: boolean | undefined): string {
+  const head = `UniFi refused access to this console's Network application (HTTP 403: GET ${path}).`;
+  if (owner === true) {
+    return (
+      `${head} The API key's UI.com account owns this console, so ownership is not the cause: ` +
+      "check the API key's permissions and that the console is online and on firmware 5.0.3 or later. " +
+      SITE_MANAGER_STILL_WORKS
+    );
+  }
+  const ownership =
+    owner === false
+      ? "The cloud connector only works for consoles owned by the API key's UI.com account; this console is not owned by it (unifi_list_hosts shows owner: false), so it is shared with the account as an admin."
+      : "The cloud connector only works for consoles owned by the API key's UI.com account; this console is likely shared with it as an admin, not owned (owner: false in unifi_list_hosts confirms this).";
+  return (
+    `${head} ${ownership} ${SITE_MANAGER_STILL_WORKS} ` +
+    "Fix: transfer the console's ownership to the key's account, or use the console's local Network API."
+  );
 }
 
 /** The connector prefix that last worked for each console (bounded, oldest dropped first). */
